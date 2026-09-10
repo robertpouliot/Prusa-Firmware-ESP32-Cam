@@ -15,6 +15,11 @@
    Tools -> Erase all Flash Before Sketch Upload -> Disable (first flash, new board = enable. otherwise = disable)
    Tools -> Events Run On -> Core 0
    Tools -> Flash Mode -> QIO 80MHz
+                          NOTE: if the board boot-loops after flashing (repeated
+                          RTCWDT_RTC_RST resets before any firmware output), use
+                          DIO instead. N8R8 modules flashed over esptool have been
+                          observed to require --flash_mode dio (see upstream issue
+                          #117); the same applies here if QIO does not boot.
    Tools -> Flash Size -> 8MB
    Tools -> Jtag Adapter -> Disable
    Tools -> Arduino Runs On -> Core 0
@@ -84,6 +89,10 @@
 #define SD_PIN_CLK                  39      ///< GPIO pin for SD card clock
 #define SD_PIN_CMD                  38      ///< GPIO pin for SD card command
 #define SD_PIN_DATA0                40      ///< GPIO pin for SD card data 0
+/* The ESP32-S3-WROOM-1 fails SD init at the default 40MHz (espressif/esp-idf#8521),
+   usually as error 0x107 from sdmmc_card_init. Boards that do not define this keep the
+   core's default. */
+#define SD_MMC_FREQUENCY            SDMMC_FREQ_DEFAULT  ///< SDMMC bus frequency (20MHz)
 
 /* ---------- RESET CFG CONFIGURATION  ----------*/
 #define CFG_RESET_PIN               21      ///< GPIO 12 is for reset CFG to default

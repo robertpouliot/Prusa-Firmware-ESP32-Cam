@@ -24,7 +24,9 @@ Logs::Logs() {
   FileMaxSize = 1024;
   NtpTimeSynced = false;
   LogMsg = "";
-  LogMutex = xSemaphoreCreateMutex();
+  /* assigning "" keeps capacity, so most lines are built without allocating */
+  LogMsg.reserve(128);
+  LogMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -40,7 +42,9 @@ Logs::Logs(String i_FilePath, String i_FileName) {
   FileMaxSize = 1024;
   NtpTimeSynced = false;
   LogMsg = "";
-  LogMutex = xSemaphoreCreateMutex();
+  /* assigning "" keeps capacity, so most lines are built without allocating */
+  LogMsg.reserve(128);
+  LogMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -57,7 +61,9 @@ Logs::Logs(LogLevel_enum i_LogLevel, String i_FilePath, String i_FileName) {
   FileMaxSize = 1024;
   NtpTimeSynced = false;
   LogMsg = "";
-  LogMutex = xSemaphoreCreateMutex();
+  /* assigning "" keeps capacity, so most lines are built without allocating */
+  LogMsg.reserve(128);
+  LogMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -74,7 +80,9 @@ Logs::Logs(String i_FilePath, String i_FileName, uint16_t i_FileSize) {
   FileMaxSize = i_FileSize;
   NtpTimeSynced = false;
   LogMsg = "";
-  LogMutex = xSemaphoreCreateMutex();
+  /* assigning "" keeps capacity, so most lines are built without allocating */
+  LogMsg.reserve(128);
+  LogMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -92,7 +100,9 @@ Logs::Logs(LogLevel_enum i_LogLevel, String i_FilePath, String i_FileName, uint1
   FileMaxSize = i_FileSize;
   NtpTimeSynced = false;
   LogMsg = "";
-  LogMutex = xSemaphoreCreateMutex();
+  /* assigning "" keeps capacity, so most lines are built without allocating */
+  LogMsg.reserve(128);
+  LogMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -145,7 +155,10 @@ void Logs::Init() {
  */
 void Logs::LogOpenFile() {
 #if (true == ENABLE_SD_CARD)
+  /* guards LogFile / LogFileOpened, which AddEvent() also touches */
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
   LogFileOpened = OpenFile(&LogFile, FilePath + FileName);
+  xSemaphoreGiveRecursive(LogMutex);
 #endif
 }
 
@@ -155,7 +168,10 @@ void Logs::LogOpenFile() {
  */
 void Logs::LogCloseFile() {
 #if (true == ENABLE_SD_CARD)
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
   CloseFile(&LogFile);
+  LogFileOpened = false;
+  xSemaphoreGiveRecursive(LogMutex);
 #endif
 }
 
@@ -163,9 +179,11 @@ void Logs::LogCloseFile() {
  * @brief Function for check opened log file
  * 
  */
-void Logs::LogCheckOpenedFile() { 
+void Logs::LogCheckOpenedFile() {
 #if (true == ENABLE_SD_CARD)
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
   LogFileOpened = CheckOpenFile(&LogFile);
+  xSemaphoreGiveRecursive(LogMutex);
 #endif
 }
 
@@ -186,16 +204,27 @@ void Logs::SetLogLevel(LogLevel_enum level) {
    @param bool - date
    @return none
 */
-void Logs::AddEvent(LogLevel_enum level, String msg, bool newLine, bool date) {
+void Logs::AddEvent(LogLevel_enum level, const String& msg, bool newLine, bool date) {
+  /* Filter before locking. Previously a discarded message still queued behind whichever
+     task held LogMutex mid SD write.  */
+  if (LogLevel < level) {
+#if (true == CONSOLE_VERBOSE_DEBUG)
+    Serial.println(msg);
+#endif
+    return;
+  }
+
   /* mutex for log */
-  xSemaphoreTake(LogMutex, portMAX_DELAY);
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
   /* check log level */
   if (LogLevel >= level) {
 
-    /* create log message */
+    /* create log message. Reuses LogMsg's buffer. */
     LogMsg = "";
     if (true == date) {
-      LogMsg += GetSystemTime();
+      char ts[24];
+      GetSystemTime(ts, sizeof(ts));
+      LogMsg += ts;
       LogMsg += " - ";
     }
     LogMsg += msg;
@@ -224,7 +253,7 @@ void Logs::AddEvent(LogLevel_enum level, String msg, bool newLine, bool date) {
     Serial.println(msg);
   }
 #endif
-  xSemaphoreGive(LogMutex);
+  xSemaphoreGiveRecursive(LogMutex);
 }
 
 /**
@@ -236,9 +265,16 @@ void Logs::AddEvent(LogLevel_enum level, String msg, bool newLine, bool date) {
    @param bool - date
    @return none
 */
-void Logs::AddEvent(LogLevel_enum level, const __FlashStringHelper *msg, String parameters, bool newLine, bool date) {
+void Logs::AddEvent(LogLevel_enum level, const __FlashStringHelper *msg, const String& parameters, bool newLine, bool date) {
+  if (LogLevel < level) {
+#if (true == CONSOLE_VERBOSE_DEBUG)
+    Serial.println(msg);
+#endif
+    return;
+  }
+
   /* mutex for log */
-  xSemaphoreTake(LogMutex, portMAX_DELAY);
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
 
   /* check log level */
   if (LogLevel >= level) {
@@ -246,7 +282,9 @@ void Logs::AddEvent(LogLevel_enum level, const __FlashStringHelper *msg, String 
     /* create log message */
     LogMsg = "";
     if (true == date) {
-      LogMsg += GetSystemTime();
+      char ts[24];
+      GetSystemTime(ts, sizeof(ts));
+      LogMsg += ts;
       LogMsg += " - ";
     }
     LogMsg += msg;
@@ -279,7 +317,7 @@ void Logs::AddEvent(LogLevel_enum level, const __FlashStringHelper *msg, String 
 #endif
 
   /* release mutex */
-  xSemaphoreGive(LogMutex);
+  xSemaphoreGiveRecursive(LogMutex);
  }
 
 /**
@@ -362,6 +400,12 @@ bool Logs::GetNtpTimeSynced() {
 */
 void Logs::CheckMaxLogFileSize() {
 #if (true == ENABLE_SD_CARD)
+  /* Rotation must be atomic w.r.t. AddEvent(): sdCardMutex does not stop another task
+     appending between LogCloseFile() and LogOpenFile(), i.e. into a closed File.
+     Recursive because AddEvent() below takes it too. Lock order LogMutex -> sdCardMutex
+     matches AddEvent -> AppendFile; MicroSd never calls back into Logs. */
+  xSemaphoreTakeRecursive(LogMutex, portMAX_DELAY);
+
   uint32_t FileSize = GetFileSize(SD_MMC, FilePath + FileName);
   AddEvent(LogLevel_Verbose, F("Log file size: "), String(FileSize) + "/" + String(LOGS_FILE_MAX_SIZE) + " B");
 
@@ -372,6 +416,8 @@ void Logs::CheckMaxLogFileSize() {
     RenameFile(SD_MMC, FilePath + FileName, FilePath + FileName + String(file_count));
     LogOpenFile();
   }
+
+  xSemaphoreGiveRecursive(LogMutex);
 #endif
 }
 
@@ -415,6 +461,24 @@ String Logs::GetSystemTime() {
     ret = String(timeString);
   }
   return ret;
+}
+
+/**
+   @info Get system time into a caller-supplied buffer (no heap allocation)
+   @param char* - output buffer
+   @param size_t - buffer size, at least 20
+   @return none
+*/
+void Logs::GetSystemTime(char* o_buf, size_t i_len) {
+  strncpy(o_buf, "0000-00-00_00-00-00", i_len - 1);
+  o_buf[i_len - 1] = '\0';
+
+  if (true == NtpTimeSynced) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      strftime(o_buf, i_len, "%Y-%m-%d_%H-%M-%S", &timeinfo);
+    }
+  }
 }
 
 /* EOF */

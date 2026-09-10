@@ -72,8 +72,17 @@ void Camera::Init() {
 #endif
 
   InitCameraModule();
+
+  /* Register writes issued right after esp_camera_init() can be overwritten by the
+     sensor's own power-up sequence. The OV3660 is far more sensitive to this than the
+     OV2640: settings were lost, leaving a black image until any web UI change called
+     ApplyCameraCfg() again. Apply, settle, apply again. */
+  delay(100);
   ApplyCameraCfg();
   GetCameraModel();
+
+  delay(250);
+  ApplyCameraCfg();
 }
 
 /**
@@ -125,7 +134,15 @@ void Camera::InitCameraModule() {
 
   CameraConfig.frame_size = TFrameSize;             /* FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA */
   CameraConfig.jpeg_quality = PhotoQuality;         /* 10-63 lower number means higher quality */
+  /* Two buffers when PSRAM is available: with one, the sensor has nowhere to write the
+     next frame while the current one is being sent, so throughput collapses under load
+     (SXGA stream decayed 5.6 -> 3.8 FPS, then dropped) and cam_hal reports FB-OVF.
+     Guarded because two SXGA buffers do not fit in DRAM. */
+#if (true == ENABLE_PSRAM)
+  CameraConfig.fb_count = 2;                        /* picture frame buffer alocation */
+#else
   CameraConfig.fb_count = 1;                        /* picture frame buffer alocation */
+#endif
   CameraConfig.grab_mode = CAMERA_GRAB_LATEST;      /* CAMERA_GRAB_WHEN_EMPTY or CAMERA_GRAB_LATEST */
 #if (true == ENABLE_PSRAM)
   CameraConfig.fb_location = CAMERA_FB_IN_PSRAM;    /* CAMERA_FB_IN_PSRAM or CAMERA_FB_IN_DRAM  */
@@ -300,6 +317,11 @@ void Camera::ApplyCameraCfg() {
 
   /* sensor configuration */
   sensor = esp_camera_sensor_get();
+  /* NULL when no sensor is initialised; the calls below would fault as LoadProhibited */
+  if (NULL == sensor) {
+    log->AddEvent(LogLevel_Error, F("Camera sensor not available. Skip applying CFG"));
+    return;
+  }
   sensor->set_brightness(sensor, brightness);         // -2 to 2
   sensor->set_contrast(sensor, contrast);             // -2 to 2
   sensor->set_saturation(sensor, saturation);         // -2 to 2
@@ -330,13 +352,31 @@ void Camera::ApplyCameraCfg() {
    @return none
 */
 void Camera::ReinitCameraModule() {
+  /* Hold the semaphore across the whole teardown/rebuild: esp_camera_deinit() frees the
+     DMA buffers, and SetFrameSize() calls this from the web task while the photo task
+     may be mid-capture (why changing resolution killed the video feed). */
+  xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY);
+
   esp_err_t err = esp_camera_deinit();
   if (err != ESP_OK) {
     log->AddEvent(LogLevel_Warning, F("Camera error deinit camera module. Error: "), String(err, HEX));
   }
+
+  /* deinit freed these; a stale pointer passed to esp_camera_fb_return() on the new
+     driver corrupts its accounting and every later fb_get() fails */
+  FrameBuffer = NULL;
+  PhotoExifData.header = NULL;
+
   delay(100);
   InitCameraModule();
+
+  /* same OV3660 behaviour as Camera::Init(): settle, then apply twice */
+  delay(100);
   ApplyCameraCfg();
+  delay(250);
+  ApplyCameraCfg();
+
+  xSemaphoreGive(frameBufferSemaphore);
 }
 
 /**
@@ -396,15 +436,19 @@ void Camera::CapturePhoto() {
 
     if (FrameBuffer) {
       esp_camera_fb_return(FrameBuffer);
+      /* clear after returning, else the next pass returns the same buffer twice and
+         corrupts the driver's accounting */
+      FrameBuffer = NULL;
     }
 
     /* Capturing a training photo. Without this sequence, the camera will not obtain the current photo but photo from the previous cycle. */
     FrameBuffer = esp_camera_fb_get();
     if (FrameBuffer) {
       esp_camera_fb_return(FrameBuffer);
+      FrameBuffer = NULL;
       log->AddEvent(LogLevel_Verbose, F("Camera capture training photo"));
     } else {
-      esp_camera_fb_return(FrameBuffer);
+      /* no fb_return() here: FrameBuffer is NULL in this branch */
       log->AddEvent(LogLevel_Error, F("Camera capture failed training photo"));
       //ReinitCameraModule();
     }
@@ -420,6 +464,15 @@ void Camera::CapturePhoto() {
         CameraCaptureFailedCounter++;
         log->AddEvent(LogLevel_Error, F("Camera capture failed! photo. Attempt: "), String(CameraCaptureFailedCounter));
         xSemaphoreGive(frameBufferSemaphore);  // Release semaphore before returning
+
+        /* Do not plain return: the reinit recovery sits at the end of this function, so
+           an early return skipped it on the very failure it handles (counter observed
+           climbing to 95). Run the check before leaving. */
+        if (CameraCaptureFailedCounter > CAMERA_MAX_FAIL_CAPTURE) {
+          log->AddEvent(LogLevel_Error, F("Camera capture failed! photo max attempts"));
+          CameraCaptureFailedCounter = 0;
+          ReinitCameraModule();
+        }
         return;
       }
 
@@ -484,13 +537,26 @@ void Camera::CapturePhoto() {
    @return none
 */
 void Camera::CaptureStream(camera_fb_t* i_buf) {
-  if (xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY)) {
+  /* Bounded wait, not portMAX_DELAY: this runs inside the AsyncTCP task, so blocking
+     here blocks the TCP stack. A long hold elsewhere (upload, reinit, snapshot) stalled
+     it until lwIP dropped the connection ("transfer closed with outstanding read data
+     remaining"). Giving up lets the caller skip the frame and keep the stream
+     alive instead. */
+  if (pdTRUE == xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_STREAM_LOCK_TIMEOUT))) {
     do {
       /* capture final photo */
       FrameBuffer = esp_camera_fb_get();
       if (!FrameBuffer) {
         log->AddEvent(LogLevel_Error, F("Camera capture failed! stream"));
-        i_buf = NULL;
+        /* Report failure through the caller's struct: assigning i_buf = NULL would only
+           change our local copy, and the caller would transmit the previous frame --
+           a buffer already returned to the driver. */
+        if (NULL != i_buf) {
+          i_buf->buf = NULL;
+          i_buf->len = 0;
+        }
+        /* must release: returning while holding this leaks it permanently */
+        xSemaphoreGive(frameBufferSemaphore);
         return;
       }
 
@@ -521,6 +587,20 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
         /* Allocate memory for the duplicate frame structure */
         FrameBufferExif = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
 
+        /* must be checked before ->buf is assigned below: NULL deref on PSRAM exhaustion */
+        if (NULL == FrameBufferExif) {
+          log->AddEvent(LogLevel_Error, F("Failed to allocate memory for EXIF frame struct"));
+          if (NULL != i_buf) {
+            i_buf->buf = NULL;
+            i_buf->len = 0;
+          }
+          esp_camera_fb_return(FrameBuffer);
+          FrameBuffer = NULL;
+          xSemaphoreGive(frameBufferSemaphore);
+          return;
+        }
+        memset(FrameBufferExif, 0, sizeof(camera_fb_t));
+
         /* Calculate the total size of the buffer */
         size_t totalSize = PhotoExifData.len + FrameBuffer->len - PhotoExifData.offset;
 
@@ -528,6 +608,14 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
         FrameBufferExif->buf = (uint8_t*)heap_caps_malloc(totalSize, MALLOC_CAP_SPIRAM);
         if (FrameBufferExif->buf == NULL) {
           log->AddEvent(LogLevel_Error, F("Failed to allocate memory for EXIF buffer"));
+          /* release the semaphore and the frame, and signal failure via i_buf */
+          if (NULL != i_buf) {
+            i_buf->buf = NULL;
+            i_buf->len = 0;
+          }
+          esp_camera_fb_return(FrameBuffer);
+          FrameBuffer = NULL;
+          xSemaphoreGive(frameBufferSemaphore);
           return;
         }
 
@@ -572,6 +660,11 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
       /* Allocate memory for the duplicate frame structure */
       FrameBufferDuplicate = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
 
+      /* check before the memcpy below writes through it */
+      if (NULL == FrameBufferDuplicate) {
+        Serial.println("Failed to allocate memory for the duplicate frame struct");
+      } else {
+
       /* Copy the metadata */
       if (true == ExifStatus) {
         memcpy(FrameBufferDuplicate, FrameBufferExif, sizeof(camera_fb_t));
@@ -588,21 +681,31 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
 
       /* Check if memory allocation was successful */
       if (!FrameBufferDuplicate->buf) {
-        /* Handle error */
+        /* clear after freeing, else the next pass double-frees */
         free(FrameBufferDuplicate);
+        FrameBufferDuplicate = NULL;
         Serial.println("Failed to allocate memory for the duplicate frame buffer");
       } else {
         /* Copy the image data */
         if (true == ExifStatus) {
           memcpy(FrameBufferDuplicate->buf, FrameBufferExif->buf, FrameBufferExif->len);
-          
+
         } else {
           memcpy(FrameBufferDuplicate->buf, FrameBuffer->buf, FrameBuffer->len);
         }
       }
+      } /* end NULL == FrameBufferDuplicate guard */
     }
 
     xSemaphoreGive(frameBufferSemaphore);
+
+  } else {
+    /* lock timed out: report no frame so the caller skips it and keeps the stream open */
+    log->AddEvent(LogLevel_Verbose, F("Stream: camera busy, skipping frame"));
+    if (NULL != i_buf) {
+      i_buf->buf = NULL;
+      i_buf->len = 0;
+    }
   }
 }
 
@@ -612,7 +715,15 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
    @return none
 */
 void Camera::CaptureReturnFrameBuffer() {
-  esp_camera_fb_return(FrameBuffer);
+  /* Idempotent: return at most once, then forget. The stream response destructor calls
+     SetStreamStatus(false) and this, so a frame was returned two or three times per
+     teardown, corrupting the driver's free-buffer queue (continuous FB-OVF). */
+  xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY);
+  if (NULL != FrameBuffer) {
+    esp_camera_fb_return(FrameBuffer);
+    FrameBuffer = NULL;
+  }
+  xSemaphoreGive(frameBufferSemaphore);
 }
 
 /**
@@ -621,10 +732,14 @@ void Camera::CaptureReturnFrameBuffer() {
    @return none
 */
 void Camera::SetStreamStatus(bool i_status) {
+  xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY);
   StreamOnOff = i_status;
-  if (FrameBuffer) {
+  /* same double-release reason as CaptureReturnFrameBuffer() */
+  if (NULL != FrameBuffer) {
     esp_camera_fb_return(FrameBuffer);
+    FrameBuffer = NULL;
   }
+  xSemaphoreGive(frameBufferSemaphore);
   log->AddEvent(LogLevel_Info, F("Camera video stream: "), String(StreamOnOff));
 }
 
@@ -805,6 +920,8 @@ void Camera::SetPhotoQuality(uint8_t i_data) {
   config->SavePhotoQuality(i_data);
   PhotoQuality = i_data;
   ReinitCameraModule();
+  /* same as SetFrameSize(): the reinit discards the current frame, so refill it */
+  CapturePhoto();
 }
 
 /**
@@ -817,6 +934,10 @@ void Camera::SetFrameSize(uint8_t i_data) {
   FrameSize = i_data;
   TFrameSize = TransformFrameSizeDataType(i_data);
   ReinitCameraModule();
+
+  /* The reinit frees the old frame and nothing refills it until the next scheduled
+     capture, which can be minutes away; /saved-photo.jpg would 404 meanwhile. */
+  CapturePhoto();
 }
 
 /**

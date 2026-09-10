@@ -10,6 +10,7 @@
 */
 
 #include "wifi_mngt.h"
+#include <esp_sntp.h>
 
 WiFiMngt SystemWifiMngt(&SystemConfig, &SystemLog, &SystemCamera);
 
@@ -32,6 +33,8 @@ WiFiMngt::WiFiMngt(Configuration *i_conf, Logs *i_log, Camera *i_cam) {
 
   NtpFirstSync = false;
   StartStaWdg = false;
+  LastStaConnectAttempt = 0;
+  WiFiMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -138,6 +141,7 @@ void WiFiMngt::Init() {
    @return none
 */
 void WiFiMngt::WifiManagement() {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   /* check disable service AP */
   unsigned long currentMillis = millis();
   if (currentMillis - TaskAp_previousMillis >= STA_AP_MODE_TIMEOUT) {
@@ -171,6 +175,7 @@ void WiFiMngt::WifiManagement() {
   if ((true == config->CheckActifeWifiCfgFlag()) && (false == NtpFirstSync) && (WL_CONNECTED == WiFi.status())) {
     SyncNtpTime();
   }
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -179,12 +184,25 @@ void WiFiMngt::WifiManagement() {
    @return none
 */
 void WiFiMngt::WiFiReconnect() {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   if ((WiFi.status() != WL_CONNECTED) && (FirstConnected == true)) {
     log->AddEvent(LogLevel_Warning, F("Reconnecting to WiFi. STA"));
     WiFi.disconnect();
     log->AddEvent(LogLevel_Warning, F("Disconnect from WiFi"));
     WiFi.reconnect();
     log->AddEvent(LogLevel_Warning, F("Reconnecting to WiFi. STA"));
+  } else if ((WiFi.status() != WL_CONNECTED) && (false == FirstConnected) && (true == config->CheckActifeWifiCfgFlag())
+             && ((millis() - LastStaConnectAttempt) >= WIFI_STA_RETRY_INTERVAL)) {
+    /* Never connected since boot. WiFi.begin() is one-shot and non-blocking, and
+       nothing else retries it, so a first attempt that silently fails leaves the device
+       disconnected forever. Disconnect first: status != WL_CONNECTED does not mean the
+       driver is idle, and begin() into a connecting driver hits "sta is connecting,
+       cannot set config". WIFI_STA_RETRY_INTERVAL keeps this from tearing down the
+       in-flight attempt Init() issued moments earlier. */
+    log->AddEvent(LogLevel_Warning, F("Never connected to WiFi since boot. Retrying STA connect"));
+    WiFi.disconnect();
+    delay(100);
+    WiFiStaConnect();
   } else if (WiFi.status() == WL_CONNECTED) {
     char cstr[150];
     sprintf(cstr, "Wifi connected. SSID: %s, BSSID: %s, RSSI: %d dBm, IP: %s, TX power: %s", WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), TranslateTxPower(WiFi.getTxPower()).c_str());  //print 3 digits
@@ -197,6 +215,7 @@ void WiFiMngt::WiFiReconnect() {
     WiFi.reconnect();
     Connect.SetBackendAvailabilitStatus(WaitForFirstConnection);
   }
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -227,6 +246,7 @@ void WiFiMngt::SetWifiEvents() {
    @note https://espressif-docs.readthedocs-hosted.com/projects/arduino-esp32/en/latest/api/wifi.html#sta-connection
 */
 void WiFiMngt::WiFiStaConnect() {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   if (config->CheckActifeWifiCfgFlag() == true) {
     system_led.setTimer(STATUS_LED_STA_CONNECTING);
     if (false == WiFiStaMultipleNetwork) {
@@ -249,7 +269,11 @@ void WiFiMngt::WiFiStaConnect() {
     }
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
+
+    /* lets the retry in WiFiReconnect() leave this attempt time to complete */
+    LastStaConnectAttempt = millis();
   }
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -280,8 +304,18 @@ void WiFiMngt::SyncNtpTime() {
     if (true == log->GetNtpTimeSynced()) {
       log->AddEvent(LogLevel_Info, F("Sync NTP time done. Set UTC timezone"));
       NtpFirstSync = true;
+
+      /* Stop SNTP once the clock is set. Left running it keeps resolving its servers,
+         and lwIP dispatches the pending DNS callback inside whichever task makes the
+         next DNS call -- sntp_dns_found ran in System_TaskMain's OTA lookup and
+         allocated a UDP socket without the TCPIP core lock ("assert failed:
+         udp_new_ip_type"), rebooting the board. configTime() restarts it. */
+      esp_sntp_stop();
+
     } else {
       log->AddEvent(LogLevel_Info, F("Sync NTP time fail"));
+      /* also on failure: that client is the one left with DNS work pending */
+      esp_sntp_stop();
     }
   }
 }
@@ -779,6 +813,9 @@ String WiFiMngt::GetNetStaticDns() {
    @return none
 */
 void WiFiMngt::SetStaCredentials(String i_ssid, String i_pass) {
+  /* one unit: a concurrent WiFiStaConnect() must not see the new SSID with the old
+     password */
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   WifiSsid = i_ssid;
   config->SaveWifiSsid(WifiSsid);
 
@@ -786,6 +823,7 @@ void WiFiMngt::SetStaCredentials(String i_ssid, String i_pass) {
   config->SaveWifiPassword(WifiPassword);
 
   config->SaveWifiCfgFlag(CFG_WIFI_SETTINGS_SAVED);
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -794,8 +832,10 @@ void WiFiMngt::SetStaCredentials(String i_ssid, String i_pass) {
    @return none
 */
 void WiFiMngt::SetStaSsid(String i_ssid) {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   WifiSsid = i_ssid;
   config->SaveWifiSsid(WifiSsid);
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -804,8 +844,10 @@ void WiFiMngt::SetStaSsid(String i_ssid) {
    @return none
 */
 void WiFiMngt::SetStaPassword(String i_pass) {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   WifiPassword = i_pass;
   config->SaveWifiPassword(WifiPassword);
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -824,8 +866,14 @@ void WiFiMngt::SetEnableServiceAp(bool i_data) {
    @return none
 */
 void WiFiMngt::ConnectToSta() {
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   config->SaveWifiCfgFlag(CFG_WIFI_SETTINGS_SAVED);
+  /* force the driver idle first, else begin() hits "sta is connecting, cannot set
+     config" and the new credentials silently do not take effect */
+  WiFi.disconnect();
+  delay(100);
   WiFiStaConnect();
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -862,6 +910,8 @@ void WiFiMngt::SetFirstConnection(bool i_data) {
    @return none
 */
 void WiFiMngt::SetNetworkConfig(String i_ip, String i_mask, String i_gw, String i_dns) {
+  /* one unit: a new IP with a stale gateway/mask makes the device unreachable */
+  xSemaphoreTakeRecursive(WiFiMutex, portMAX_DELAY);
   NetStaticIp.fromString(i_ip);
   NetStaticMask.fromString(i_mask);
   NetStaticGateway.fromString(i_gw);
@@ -871,6 +921,7 @@ void WiFiMngt::SetNetworkConfig(String i_ip, String i_mask, String i_gw, String 
   config->SaveNetworkMask(NetStaticMask.toString());
   config->SaveNetworkGateway(NetStaticGateway.toString());
   config->SaveNetworkDns(NetStaticDns.toString());
+  xSemaphoreGiveRecursive(WiFiMutex);
 }
 
 /**
@@ -933,6 +984,14 @@ void WiFiMngt_WiFiEventStationConnected(WiFiEvent_t event, WiFiEventInfo_t info)
 */
 void WiFiMngt_WiFiEventGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   system_led.setTimer(STATUS_LED_STA_CONNECTED);
+
+  /* Re-assert no-power-save now the link is up: Init() and WiFiStaConnect() both run
+     before association, and the driver resets the mode on (re)connect. AP mode masked
+     this by keeping the radio awake; with the AP off, every request waits for the
+     router's next DTIM beacon. */
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  WiFi.setSleep(false);
+
   SystemLog.AddEvent(LogLevel_Info, "WiFi Got IP address: " + WiFi.localIP().toString());
   SystemLog.AddEvent(LogLevel_Info, "WiFi Got mask: " + WiFi.subnetMask().toString());
   SystemLog.AddEvent(LogLevel_Info, "WiFi Got gateway: " + WiFi.gatewayIP().toString());

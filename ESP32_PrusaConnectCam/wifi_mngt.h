@@ -78,6 +78,7 @@ private:
 
   unsigned long TaskAp_previousMillis;  ///< previous time for task AP
   unsigned long TaskWdg_previousMillis; ///< previous time for task STA watchdog
+  unsigned long LastStaConnectAttempt;  ///< millis() of the last WiFi.begin(), used to space out connection retries
 
   String mDNS_record;                 ///< mDNS record
   String WifiScanJson;                ///< global variable with wifi networks
@@ -85,6 +86,12 @@ private:
   Configuration *config;              ///< pointer to configuration class
   Logs *log;                          ///< pointer to log class
   Camera *cam;                        ///< pointer to camera class
+
+  /* Serialises WiFi state changes: esp_wifi_set_config() rejects a second in-flight
+     connect ("sta is connecting, cannot set config"), and callers run in different
+     tasks (web handlers, serial cfg, WiFiManagement). Recursive: these methods nest
+     (WiFiReconnect -> WiFiStaConnect). */
+  SemaphoreHandle_t WiFiMutex;        ///< mutex for WiFi state changes
 
 public:
   WiFiMngt(Configuration*, Logs*, Camera*);

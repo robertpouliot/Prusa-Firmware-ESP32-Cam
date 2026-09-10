@@ -20,20 +20,26 @@ struct WebBasicAuth_struct {
   String Password;                        ///< password for basic auth
 };
 
+/* The scalar flags are volatile: written by one task and polled by another, and without
+   it the compiler may cache them in a register. Aligned bool/int accesses are single
+   instructions on Xtensa, so stale reads were the risk, not tearing.
+   The String members are NOT covered -- a String is a pointer plus length and can still
+   race -- but they are only touched during an OTA update. */
 struct FirmwareUpdate_struct {
   String UpdatingStatus;                  ///< Updateing status
-  bool Processing;                        ///< status abour processing firmware update
-  uint8_t PercentProcess;                 ///< processed firmware update
-  int TransferedBytes;                    ///< transfered bytes
+  volatile bool Processing;               ///< status abour processing firmware update
+  volatile uint8_t PercentProcess;        ///< processed firmware update
+  volatile int TransferedBytes;           ///< transfered bytes
 
-  int FirmwareSize;                       ///< uploaded firmware size
+  volatile int FirmwareSize;              ///< uploaded firmware size
 
-  bool StartOtaUpdate;                    ///< Start OTA update process
-  bool CheckNewVersionAfterBoot;          ///< Check new version OTA update after MCU boot
+  volatile bool StartOtaUpdate;           ///< Start OTA update process
+  volatile bool CheckNewVersionAfterBoot; ///< Check new version OTA update after MCU boot
+  volatile bool RequestNewVersionCheck;   ///< web UI asked for a re-check; serviced by System_Main, never inline in the handler
   String NewVersionFw;                    ///< New FW version
   String CheckNewVersionFwStatus;         ///< connection status from checking new OTA update version
   String OtaUpdateFwUrl;                  ///< URL for OTA update
-  bool OtaUpdateFwAvailable;              ///< flag for available new FW version
+  volatile bool OtaUpdateFwAvailable;     ///< flag for available new FW version
 };
 
 struct McuTemperature_struct {

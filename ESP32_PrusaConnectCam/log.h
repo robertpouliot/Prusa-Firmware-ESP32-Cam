@@ -40,8 +40,9 @@ public:
   void LogOpenFile();
   void LogCloseFile();
   void LogCheckOpenedFile();
-  void AddEvent(LogLevel_enum, String, bool = true, bool = true);
-  void AddEvent(LogLevel_enum, const __FlashStringHelper*, String, bool = true, bool = true);
+  /* const reference: by-value String parameters heap-copied the message on every call */
+  void AddEvent(LogLevel_enum, const String&, bool = true, bool = true);
+  void AddEvent(LogLevel_enum, const __FlashStringHelper*, const String&, bool = true, bool = true);
   void SetLogLevel(LogLevel_enum);
   void SetFileName(String);
   void SetFilePath(String);
@@ -57,6 +58,10 @@ public:
   bool GetLogFileOpened();
 
   String GetSystemTime();
+
+private:
+  /* in-place variant used by AddEvent(): no temporary String per log line */
+  void GetSystemTime(char* o_buf, size_t i_len);
 };
 
 extern Logs SystemLog;  ///< log object

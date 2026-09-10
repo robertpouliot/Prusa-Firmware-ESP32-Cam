@@ -43,6 +43,7 @@ private:
   uint8_t UsedSpacePercent;       ///< Used space in percent
   File file;                      ///< File object
   SemaphoreHandle_t sdCardMutex;  ///< Mutex for SD card
+  unsigned long LastLogFlushMillis;  ///< last log flush timestamp
 
 public:
   MicroSd();

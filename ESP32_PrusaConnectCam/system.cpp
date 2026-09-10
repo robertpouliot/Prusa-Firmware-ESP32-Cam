@@ -103,9 +103,26 @@ void System_UpdateInit() {
    @return none
 */
 void System_Main() {
-  /* check new FW version */
-  if (false == FirmwareUpdate.CheckNewVersionAfterBoot) {
+  /* Check only once the clock is set: TLS validates the CA against the system clock */
+  static unsigned long LastOtaCheckAttempt = 0;
+
+  if ((false == FirmwareUpdate.CheckNewVersionAfterBoot) && (true == SystemLog.GetNtpTimeSynced())
+      && ((0 == LastOtaCheckAttempt) || ((millis() - LastOtaCheckAttempt) >= OTA_CHECK_RETRY_INTERVAL))) {
+    LastOtaCheckAttempt = millis();
     System_CheckNewVersion();
+  }
+
+  /* Re-check requested by the web UI (/check_web_ota_update). The handler only sets the
+     flag; doing the work here keeps it off the async web server task. */
+  if (true == FirmwareUpdate.RequestNewVersionCheck) {
+    FirmwareUpdate.RequestNewVersionCheck = false;
+    /* same clock requirement as above -- report it instead of a bare connection error */
+    if (true == SystemLog.GetNtpTimeSynced()) {
+      System_CheckNewVersion();
+    } else {
+      FirmwareUpdate.CheckNewVersionFwStatus = F("Time not synced yet, try again later");
+      SystemLog.AddEvent(LogLevel_Warning, FirmwareUpdate.CheckNewVersionFwStatus);
+    }
   }
 
   /* task for download and flash FW from server */
@@ -123,7 +140,9 @@ void System_Main() {
 void System_CheckNewVersion() {
   if (WL_CONNECTED == WiFi.status()) {
     SystemLog.AddEvent(LogLevel_Info, F("Check new FW version from OTA"));
-    FirmwareUpdate.CheckNewVersionAfterBoot = true;
+    /* CheckNewVersionAfterBoot is set only once a version has been parsed: this request
+       fails intermittently (TLS EOF, reset, empty body), and setting it up front
+       disabled the check until the next reboot. */
     WiFiClientSecure client;
     client.setCACert(root_CAs_ota);
     //client.setInsecure();
@@ -177,6 +196,8 @@ void System_CheckNewVersion() {
       } else {
         const char *firmwareVersion = jsonDoc["tag_name"];
         if (firmwareVersion) {
+          /* Success: stop re-checking for the rest of this boot. */
+          FirmwareUpdate.CheckNewVersionAfterBoot = true;
           FirmwareUpdate.CheckNewVersionFwStatus = F("Download successful");
           FirmwareUpdate.NewVersionFw = firmwareVersion;
           SystemLog.AddEvent(LogLevel_Info, "Available OTA firmware: " + FirmwareUpdate.NewVersionFw);
@@ -188,6 +209,10 @@ void System_CheckNewVersion() {
           for(int i = 0; i < assetsCount; i++) {
             JsonObject asset = assets[i];
             const char* name = asset["name"];
+            /* NULL when the asset has no "name"; strcmp_P() would panic on it */
+            if (NULL == name) {
+              continue;
+            }
             SystemLog.AddEvent(LogLevel_Info, "Assets[" + String(i) + "]: " + String(name));
 
             /* get FW file and URL */
@@ -450,6 +475,7 @@ String System_printMcuResetReasonSimple() {
 */
 void System_TaskWifiManagement(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("Task Wifi Management. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -478,6 +504,7 @@ void System_TaskWifiManagement(void *pvParameters) {
  */
 void System_TaskMain(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("System task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -502,24 +529,34 @@ void System_TaskMain(void *pvParameters) {
  */
 void System_TaskCaptureAndSendPhoto(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("Task photo processing. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
     if (Connect.CheckSendingIntervalExpired()) {
       Connect.SetSendingIntervalCounter(0);
+      /* Unwatch for the backend calls only. setTimeout() bounds the socket but not the
+         DNS resolution before it, so with no route to the internet this task blocks in
+         connect() past any watchdog period and reboots the board. An unreachable
+         backend is not a firmware fault. Neither call returns early, so the
+         delete/add pair brackets every path out. */
+      esp_task_wdt_delete(NULL);
+
       /* send network information to backend */
       if ((WL_CONNECTED == WiFi.status()) && (false == FirmwareUpdate.Processing)) {
         SystemLog.AddEvent(LogLevel_Verbose, F("Task photo processing. Start sending info"));
-        esp_task_wdt_reset();
         Connect.SendInfoToBackend();
       }
 
       /* send photo to backend*/
       if ((WL_CONNECTED == WiFi.status()) && (false == FirmwareUpdate.Processing)) {
         SystemLog.AddEvent(LogLevel_Verbose, F("Task photo processing. Start sending photo"));
-        esp_task_wdt_reset();
         Connect.TakePictureAndSendToBackend();
       }
+
+      /* rejoin the watchdog before the supervised part of the loop resumes */
+      esp_task_wdt_add(NULL);
+      esp_task_wdt_reset();
 
     } else {
       /* update counter */
@@ -544,6 +581,7 @@ void System_TaskCaptureAndSendPhoto(void *pvParameters) {
  */
 void System_TaskSdCardCheck(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("MicroSdCard check task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -596,6 +634,7 @@ void System_TaskSdCardCheck(void *pvParameters) {
  */
 void System_TaskSerialCfg(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SerialCg task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -619,6 +658,7 @@ void System_TaskSerialCfg(void *pvParameters) {
  */
 void System_TaskSystemTelemetry(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SystemTelemetry task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -634,6 +674,29 @@ void System_TaskSystemTelemetry(void *pvParameters) {
     SystemLog.AddEvent(LogLevel_Info, "Free RAM: " + String(ESP.getFreeHeap()) + " B" + ", Min: " + String(ESP.getMinFreeHeap()));
     SystemLog.AddEvent(LogLevel_Info, "Free PSRAM: " + String(ESP.getFreePsram()) + " B" + ", Min: " + String(ESP.getMinFreePsram()));
     SystemLog.AddEvent(LogLevel_Info, "MCU Temperature: " + String(McuTemperature.TemperatureCelsius) + " *C");
+
+    /* Minimum ever-free stack per task, in bytes (ESP-IDF returns bytes, not words).
+       Data for sizing the .ino's stacks per board; keep ~1kB margin over the smallest
+       value seen across a full duty cycle. A path not yet executed is not reflected. */
+    String StackMsg = F("Task stack min free (B): Photo: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_CapturePhotoAndSend));
+    StackMsg += F(", WiFiMngt: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_WiFiManagement));
+    StackMsg += F(", Main: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_SystemMain));
+#if (true == ENABLE_SD_CARD)
+    StackMsg += F(", SdCard: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_SdCardCheck));
+#endif
+    StackMsg += F(", SerialCfg: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_SerialCfg));
+    StackMsg += F(", Telemetry: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_SystemTelemetry));
+    StackMsg += F(", SysLed: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_SysLed));
+    StackMsg += F(", WiFiWdg: ");
+    StackMsg += String(uxTaskGetStackHighWaterMark(Task_WiFiWatchdog));
+    SystemLog.AddEvent(LogLevel_Info, StackMsg);
 
     ExternalTemperatureSensor.ReadSensorData();
 
@@ -653,6 +716,7 @@ void System_TaskSystemTelemetry(void *pvParameters) {
  */
 void System_TaskSysLed(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SystemLed task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -674,6 +738,7 @@ void System_TaskSysLed(void *pvParameters) {
  */
 void System_TaskWiFiWatchdog(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("WiFiWatchdog task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -697,6 +762,7 @@ void System_TaskWiFiWatchdog(void *pvParameters) {
  */
 void System_TaskSdCardRemove(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("TaskSdCardRemove. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
   TickType_t xLastWakeTime = xTaskGetTickCount();
   SdCardRemoveTime = TASK_SDCARD_FILE_REMOVE;
 

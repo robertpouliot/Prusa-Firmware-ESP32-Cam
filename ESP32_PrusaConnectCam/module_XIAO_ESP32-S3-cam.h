@@ -94,7 +94,11 @@
 #define CFG_RESET_LED_LEVEL_ON      LOW     ///< GPIO pin level for status LED ON
 
 /* -------------- STATUS LED CFG ----------------*/
-#define STATUS_LED_ENABLE           true    ///< enable/disable status LED
+/* GPIO21 is both the on-board LED and the microSD CS/DAT3. The LED init drives it low
+   before the SD mount, which can make SD_MMC.begin() fail (cardType=0, upstream #145).
+   Disabled here because ENABLE_SD_CARD is true; set true only without an SD card.
+   CFG_RESET_LED_PIN is also 21 and has the same conflict while it blinks. */
+#define STATUS_LED_ENABLE           false   ///< enable/disable status LED
 #define STATUS_LED_GPIO_NUM         21      ///< GPIO pin for status LED
 #define STATUS_LED_OFF_PIN_LEVEL    LOW    ///< GPIO pin level for status LED ON
 

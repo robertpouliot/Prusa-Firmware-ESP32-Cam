@@ -22,7 +22,7 @@
 #define ESP32_S3_WROOM_FREENOVE         false
 
 /* ---------------- BASIC MCU CFG  --------------*/
-#define SW_VERSION                  "1.1.2"                 ///< SW version
+#define SW_VERSION                  "1.1.3"                 ///< SW version
 #define SW_BUILD                    __DATE__ " " __TIME__   ///< build number
 #define CONSOLE_VERBOSE_DEBUG       false                   ///< enable/disable verbose debug log level for console
 #define DEVICE_HOSTNAME             "Prusa-ESP32cam"        ///< device hostname
@@ -50,17 +50,21 @@
 #define TASK_WIFI_WATCHDOG          20000                   ///< wifi watchdog task interval [ms]
 #define TASK_PHOTO_SEND             1000                    ///< photo send task interval [ms]
 #define TASK_SDCARD_FILE_REMOVE     30000                   ///< sd card file remove task interval [ms]
+#define LOG_FILE_FLUSH_INTERVAL     30000                   ///< min interval between flushes of the log file [ms]. Lines are still written every time, this only batches the forced sync to the card
+#define LOG_SD_LOCK_TIMEOUT         1000                    ///< max ms a log write waits for the SD card lock. Keep far below WDG_TIMEOUT: every task logs
 
 /* --------------- WEB SERVER CFG  --------------*/
 #define WEB_SERVER_PORT             80                      ///< WEB server port 
 #define SERIAL_PORT_SPEED           115200                  ///< baud rate 
-#define WDG_TIMEOUT                 40000                   ///< wdg timeout [second]
+#define WDG_TIMEOUT                 40000                   ///< wdg timeout [ms]
+#define PRUSA_CONNECT_TIMEOUT_S     10                      ///< PrusaConnect socket timeout [SECONDS -- setTimeout() takes seconds]. Keep well below WDG_TIMEOUT
 #define PHOTO_FRAGMENT_SIZE         2048                    ///< photo fragmentation size [bytes]
 #define LOOP_DELAY                  100                     ///< loop delay [ms]
 #define WIFI_CLIENT_WAIT_CON        false                   ///< wait for connecting to WiFi network
 #define WEB_CACHE_INTERVAL          86400                   ///< cache interval for browser [s] 86400s = 24h
 
 /* --------------- OTA UPDATE CFG  --------------*/
+#define OTA_CHECK_RETRY_INTERVAL    300000                  ///< min ms between OTA version check attempts while none has succeeded [5 min], keeps inside GitHub's 60 req/hour limit
 #define OTA_UPDATE_API_SERVER       "api.github.com"        ///< OTA update server URL
 #define OTA_UPDATE_API_URL          F("/repos/prusa3d/Prusa-Firmware-ESP32-Cam/releases/latest")  ///< path to file with OTA update
 
@@ -90,6 +94,7 @@
 
 /* ----------------- WiFi CFG -------------------*/
 #define WIFI_STA_WDG_TIMEOUT        60000                   ///< STA watchdog timeout [ms]
+#define WIFI_STA_RETRY_INTERVAL     20000                   ///< min ms between STA connect attempts before the first connection. Must exceed a normal association, else the retry interrupts the attempt it backs up
 #define WIFI_DISABLE_UNENCRYPTED_STA_PASS_CHECK false       ///< enable/disable WEP/WPA/WPA2/... encryption for STA mode . for the wifi network without encryption set to false
 
 /* ----------------- NTP CFG --------------------*/
@@ -103,6 +108,7 @@
 #define CAMERA_MODEL                "OV2640"                ///< Camera model string
 #define CAMERA_SOFTWARE             "Prusa ESP32-cam"       ///< Camera software string
 #define CAMERA_EXIF_ROTATION_STREAM false                   ///< enable camera exif rotation for stream
+#define CAMERA_STREAM_LOCK_TIMEOUT  150                     ///< max ms the stream waits for the camera lock. Never indefinite: this runs in the AsyncTCP task and blocking there stalls the TCP stack
 
 /* ---------------- TIMELAPS CFG ----------------*/
 #define TIMELAPS_PHOTO_FOLDER       "/timelapse"            ///< folder for timelaps photos

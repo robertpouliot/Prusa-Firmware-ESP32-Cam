@@ -46,21 +46,31 @@ void Server_InitWebServer() {
     }
     SystemCamera.SetPhotoSending(true);
 
-    SystemLog.AddEvent(LogLevel_Verbose, "Photo size: " + String(SystemCamera.GetPhotoFb()->len) + " bytes");
+    /* GetCameraCaptureSuccess() stays true after the buffer has gone back to the driver,
+       so validate the pointer itself. Take it once and use that copy throughout. */
+    camera_fb_t *fb = SystemCamera.GetPhotoFb();
+    if ((NULL == fb) || (NULL == fb->buf) || (0 == fb->len)) {
+      SystemLog.AddEvent(LogLevel_Warning, F("Photo buffer not available!"));
+      SystemCamera.SetPhotoSending(false);
+      request->send(404, "text/plain", "Photo not found!");
+      return;
+    }
+
+    SystemLog.AddEvent(LogLevel_Verbose, "Photo size: " + String(fb->len) + " bytes");
 
     if (SystemCamera.GetPhotoExifData()->header != NULL) {
       /* send photo with exif data */
       SystemLog.AddEvent(LogLevel_Verbose, F("Send photo with EXIF data"));
-      size_t total_len = SystemCamera.GetPhotoExifData()->len + SystemCamera.GetPhotoFb()->len - SystemCamera.GetPhotoExifData()->offset;
-      auto response = request->beginChunkedResponse("image/jpg", [total_len](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+      size_t total_len = SystemCamera.GetPhotoExifData()->len + fb->len - SystemCamera.GetPhotoExifData()->offset;
+      auto response = request->beginChunkedResponse("image/jpeg", [total_len, fb](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
         size_t len = 0;
         if (index < SystemCamera.GetPhotoExifData()->len) {
           len = min(maxLen, SystemCamera.GetPhotoExifData()->len - index);
           memcpy(buffer, SystemCamera.GetPhotoExifData()->header + index, len);
         } else {
           size_t offset = index - SystemCamera.GetPhotoExifData()->len + SystemCamera.GetPhotoExifData()->offset;
-          len = min(maxLen, SystemCamera.GetPhotoFb()->len - offset);
-          memcpy(buffer, SystemCamera.GetPhotoFb()->buf + offset, len);
+          len = min(maxLen, fb->len - offset);
+          memcpy(buffer, fb->buf + offset, len);
         }
         return len;
       });
@@ -70,7 +80,7 @@ void Server_InitWebServer() {
     } else {
       /* send photo without exif data */
       SystemLog.AddEvent(LogLevel_Verbose, F("Send photo without EXIF data"));
-      request->send(200, "image/jpg", SystemCamera.GetPhotoFb()->buf, SystemCamera.GetPhotoFb()->len);
+      request->send(200, "image/jpeg", fb->buf, fb->len);
     }
 
     SystemCamera.SetPhotoSending(false);
@@ -867,6 +877,11 @@ void Server_InitWebServer_Sets() {
 
       /* save ssid and password */
       SystemWifiMngt.SetStaCredentials(TmpSsid, TmpPassword);
+      /* Disconnect first: begin() into a connected or connecting driver hits "sta is
+         connecting, cannot set config" and the credentials are never applied. This is
+         why a *second* save failed while the first worked. */
+      WiFi.disconnect();
+      delay(100);
       SystemWifiMngt.WiFiStaConnect();
 
     } else {
@@ -1093,7 +1108,12 @@ void Server_InitWebServer_Update() {
     if (Server_CheckBasicAuth(request) == false)
       return;
 
-    System_CheckNewVersion();
+    /* Do NOT run System_CheckNewVersion() here: async handlers run in the AsyncTCP task
+       and must not block, and that function does seconds of TLS + JSON work on a stack
+       not sized for it. The browser also polls this endpoint, so it could re-enter
+       while System_Main ran the same check -- which crashed the MCU into a boot loop.
+       Raise a flag instead and return the last known status. */
+    FirmwareUpdate.RequestNewVersionCheck = true;
     request->send(200, F("text/html"), FirmwareUpdate.CheckNewVersionFwStatus.c_str());
   });
 }
@@ -1141,9 +1161,17 @@ void Server_handleCacheRequest(AsyncWebServerRequest* request, const char* conte
   request->send(response); 
   */
 
-  AsyncWebServerResponse* response = request->beginChunkedResponse(contentType, [data](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+  /* Measure once: the lambda below runs per chunk and called strlen() each time, which
+     for 90kB of jquery in 1.4kB chunks meant ~6MB of scanning per page load in the
+     AsyncTCP task. Cost was quadratic in file size. */
+  const size_t dataLen = strlen(data);
+
+  AsyncWebServerResponse* response = request->beginChunkedResponse(contentType, [data, dataLen](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+    if (index >= dataLen) {
+      return 0; /* finished */
+    }
     const char* dataStart = data + index; // current position in data
-    size_t dataLeft = strlen(data) - index; // how many bytes are left to send
+    size_t dataLeft = dataLen - index; // how many bytes are left to send
     size_t chunkSize = dataLeft < maxLen ? dataLeft : maxLen; // how many bytes we can send now
     memcpy(buffer, dataStart, chunkSize); // copy chunk of data to buffer
     return chunkSize; // return chunk size

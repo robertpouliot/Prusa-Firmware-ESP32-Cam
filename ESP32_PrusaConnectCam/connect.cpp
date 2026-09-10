@@ -86,8 +86,12 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
   if ((Fingerprint.length() > 0) && (Token.length() > 0)) {
     client.setCACert(root_CAs);
     //client.setInsecure();
-    client.setTimeout(1000);
-    client.setNoDelay(true);
+    /* setTimeout() governs the TLS handshake below; setNoDelay() moved after connect(),
+       since no socket exists yet (setsockopt on fd -1, errno 9 on every upload).
+       setTimeout() takes SECONDS, so the original setTimeout(1000) meant 16 minutes,
+       long past WDG_TIMEOUT -- a stalled connection aborted the MCU. Keep it well below
+       WDG_TIMEOUT so the failure is reported instead. */
+    client.setTimeout(PRUSA_CONNECT_TIMEOUT_S);
 
     log->AddEvent(LogLevel_Verbose, F("Connecting to server..."));
 
@@ -105,6 +109,9 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
       return false;
 
     } else {
+      /* a socket exists only now; before connect() this only logged EBADF */
+      client.setNoDelay(true);
+
       /* send data to server */
       log->AddEvent(LogLevel_Verbose, F("Connected to server!"));
       client.println("PUT https://" + PrusaConnectHostname + i_url_path + " HTTP/1.1");
@@ -118,7 +125,8 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
       client.println("Content-Length: " + String(i_data_length));
       client.println();
 
-      esp_task_wdt_reset();
+      /* No esp_task_wdt_reset(): the caller unsubscribes from the watchdog around these
+         backend calls, so a reset here would just log "task not found". */
       size_t sendet_data = 0;
       /* sending photo */
       if (SendPhoto == i_data_type) {
@@ -238,18 +246,29 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
  */
 void PrusaConnect::SendPhotoToBackend() {
   log->AddEvent(LogLevel_Info, F("Start sending photo to prusaconnect"));
+
+  /* Validate the buffer actually being transmitted. GetCameraCaptureSuccess() stays
+     true after the frame has gone back to the driver, and CapturePhoto() has early
+     returns that leave it untouched -- so a photo was uploaded when there was none. */
+  camera_fb_t *fb = (camera->GetStreamStatus() == false) ? camera->GetPhotoFb() : camera->GetPhotoFbDuplicate();
+
+  if ((NULL == fb) || (NULL == fb->buf) || (0 == fb->len)) {
+    log->AddEvent(LogLevel_Error, F("No valid photo in buffer. Skip sending to backend!"));
+    return;
+  }
+
   camera->SetPhotoSending(true);
   String Photo = "";
   size_t total_len = 0;
 
   if ((camera->GetPhotoExifData()->header != NULL) && (camera->GetStreamStatus() == false)) {
-    total_len = camera->GetPhotoExifData()->len + camera->GetPhotoFb()->len - camera->GetPhotoExifData()->offset;
-  } else if (camera->GetStreamStatus() == false) {
-    total_len = camera->GetPhotoFb()->len;
+    total_len = camera->GetPhotoExifData()->len + fb->len - camera->GetPhotoExifData()->offset;
   } else {
-    total_len = camera->GetPhotoFbDuplicate()->len;
+    total_len = fb->len;
   }
-  SendDataToBackend(&Photo, total_len, F("image/jpg"), F("Photo"), HOST_URL_CAM_PATH, SendPhoto);
+  /* "image/jpeg", not "image/jpg": the latter is not a registered MIME type. The backend
+     answered 200 with the full byte count but showed "The snapshot is not available". */
+  SendDataToBackend(&Photo, total_len, F("image/jpeg"), F("Photo"), HOST_URL_CAM_PATH, SendPhoto);
   camera->SetPhotoSending(false);
 }
 

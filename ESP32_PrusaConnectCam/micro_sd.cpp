@@ -19,7 +19,9 @@
 MicroSd::MicroSd() {
   CardDetected = false;
   DetectAfterBoot = false;
-  sdCardMutex = xSemaphoreCreateMutex();
+  LastLogFlushMillis = 0;
+  /* recursive: these methods nest (ReinitCard -> InitSdCard -> CheckCardUsedStatus) */
+  sdCardMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 /**
@@ -28,12 +30,14 @@ MicroSd::MicroSd() {
    @return none
 */
 void MicroSd::ReinitCard() {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   Serial.println(F("Reinit micro SD card!"));
   Serial.println(F("Deinit micro SD card"));
   SD_MMC.end();
   delay(50);
   Serial.println(F("Init micro SD card"));
   InitSdCard();
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
@@ -45,7 +49,8 @@ void MicroSd::ReinitCard() {
  * @return false 
  */
 bool MicroSd::OpenFile(File *i_file, String i_path) {
-    bool status = false;
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
+  bool status = false;
 
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -71,36 +76,41 @@ bool MicroSd::OpenFile(File *i_file, String i_path) {
       }
     }
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
 /**
  * @brief Close file
- * 
+ *
  * @param i_file - file
  */
 void MicroSd::CloseFile(File *i_file) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   if (*i_file) {
     i_file->close();
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
  * @brief Check if file is opened
- * 
+ *
  * @param i_file - file
- * @return true 
- * @return false 
+ * @return true
+ * @return false
  */
 bool MicroSd::CheckOpenFile(File *i_file) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
+  bool status = true;
   if (!*i_file) {
-#if (true == CONSOLE_VERBOSE_DEBUG)    
+#if (true == CONSOLE_VERBOSE_DEBUG)
     Serial.println(F("File not opened!"));
 #endif
-    return false;
-  } else {
-    return true;
+    status = false;
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
+  return status;
 }
 
 /**
@@ -109,6 +119,7 @@ bool MicroSd::CheckOpenFile(File *i_file) {
    @return none
 */
 void MicroSd::InitSdCard() {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   /* Start INIT Micro SD card */
   Serial.println(F("Start init micro-SD Card"));
 
@@ -117,10 +128,17 @@ void MicroSd::InitSdCard() {
 
   SD_MMC.setPins(SD_PIN_CLK, SD_PIN_CMD, SD_PIN_DATA0);
 
+  /* Board headers define SD_MMC_FREQUENCY only where the default clock fails
+     (ESP32-S3-WROOM-1 at 40MHz, espressif/esp-idf#8521). Others keep upstream begin(). */
+#ifdef SD_MMC_FREQUENCY
+  if (!SD_MMC.begin("/sdcard", true, false, SD_MMC_FREQUENCY)) {
+#else
   if (!SD_MMC.begin("/sdcard", true)) {
+#endif
     Serial.println(F("SD Card Mount Failed"));
     CardDetected = false;
     CardSizeMB = 0;
+    xSemaphoreGiveRecursive(sdCardMutex);
     return;
   }
 
@@ -130,6 +148,7 @@ void MicroSd::InitSdCard() {
     Serial.println(F("No SD_MMC card attached"));
     CardDetected = false;
     CardSizeMB = 0;
+    xSemaphoreGiveRecursive(sdCardMutex);
     return;
   }
 
@@ -150,6 +169,7 @@ void MicroSd::InitSdCard() {
 
   /* calculation card size */
   CheckCardUsedStatus();
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
@@ -160,16 +180,19 @@ void MicroSd::InitSdCard() {
    @return none
 */
 void MicroSd::ListDir(fs::FS &fs, String DirName, uint8_t levels) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   if (true == CardDetected) {
     Serial.printf("Listing directory: %s\n", DirName.c_str());
 
     File root = fs.open(DirName.c_str());
     if (!root) {
       Serial.println(F("Failed to open directory"));
+      xSemaphoreGiveRecursive(sdCardMutex);
       return;
     }
     if (!root.isDirectory()) {
       Serial.println(F("Not a directory"));
+      xSemaphoreGiveRecursive(sdCardMutex);
       return;
     }
 
@@ -190,6 +213,7 @@ void MicroSd::ListDir(fs::FS &fs, String DirName, uint8_t levels) {
       file = root.openNextFile();
     }
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
@@ -199,17 +223,19 @@ void MicroSd::ListDir(fs::FS &fs, String DirName, uint8_t levels) {
    @return bool - status
 */
 bool MicroSd::CheckDir(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
     Serial.printf("Checking Dir: %s... ", path.c_str());
 #endif
-  
+
     if (fs.exists(path.c_str())) {
       status = true;
     }
 
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -220,6 +246,7 @@ bool MicroSd::CheckDir(fs::FS &fs, String path) {
    @return bool - status
 */
 bool MicroSd::CreateDir(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -234,6 +261,7 @@ bool MicroSd::CreateDir(fs::FS &fs, String path) {
     Serial.println((status == true) ? "Created" : "Failed");
 #endif
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -244,6 +272,7 @@ bool MicroSd::CreateDir(fs::FS &fs, String path) {
    @return bool - status
 */
 bool MicroSd::RemoveDir(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -258,6 +287,7 @@ bool MicroSd::RemoveDir(fs::FS &fs, String path) {
     Serial.println((status == true) ? "Removed" : "Failed");
 #endif
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -268,12 +298,14 @@ bool MicroSd::RemoveDir(fs::FS &fs, String path) {
    @return none
 */
 void MicroSd::ReadFileConsole(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   if (true == CardDetected) {
     Serial.printf("Reading file: %s\n", path.c_str());
 
     File file = fs.open(path.c_str());
     if (!file) {
       Serial.println(F("Failed to open file for reading"));
+      xSemaphoreGiveRecursive(sdCardMutex);
       return;
     }
 
@@ -282,6 +314,7 @@ void MicroSd::ReadFileConsole(fs::FS &fs, String path) {
       Serial.write(file.read());
     }
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
@@ -292,6 +325,7 @@ void MicroSd::ReadFileConsole(fs::FS &fs, String path) {
    @return bool - status
 */
 bool MicroSd::WriteFile(fs::FS &fs, String path, String message) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -313,6 +347,7 @@ bool MicroSd::WriteFile(fs::FS &fs, String path, String message) {
 #endif
     }
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -324,6 +359,7 @@ bool MicroSd::WriteFile(fs::FS &fs, String path, String message) {
    @return bool - status
 */
 bool MicroSd::AppendFile(fs::FS &fs, String path, String message) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
 
   if (true == CardDetected) {
@@ -347,6 +383,7 @@ bool MicroSd::AppendFile(fs::FS &fs, String path, String message) {
 #endif
     }
   }
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -357,16 +394,31 @@ bool MicroSd::AppendFile(fs::FS &fs, String path, String message) {
    @return bool - status
 */
 bool MicroSd::AppendFile(File *i_file, String *i_msg) {
-  /* take mutex */
-  xSemaphoreTake(sdCardMutex, portMAX_DELAY);
+  /* Bounded wait: every task logs, so an unbounded wait here lets one slow card
+     operation stall them all (observed: task watchdog abort). On timeout drop the line
+     -- it is already on serial -- and report success so the caller does not reopen the
+     file over a transient. */
+  if (pdTRUE != xSemaphoreTakeRecursive(sdCardMutex, pdMS_TO_TICKS(LOG_SD_LOCK_TIMEOUT))) {
+    return true;
+  }
   bool status = false;
 
+  /* Health check and flush share one timer. isCardCorrupted() calls
+     SD_MMC.usedBytes() (FatFs free-space scan), far costlier than the append itself,
+     and every web request logs at least once. It is a health check, not required for
+     the write. Sentinel 0 = not done since boot, so the first line is still checked. */
+  bool PeriodicCheck = ((0 == LastLogFlushMillis) || ((millis() - LastLogFlushMillis) >= LOG_FILE_FLUSH_INTERVAL));
+
   /* check if card is corrupted */
-  if (false == isCardCorrupted()) {
-    xSemaphoreGive(sdCardMutex);
-    return false;
+  if (true == PeriodicCheck) {
+    if (false == isCardCorrupted()) {
+      /* timestamp deliberately not updated: retry is cheap once CardDetected is false */
+      xSemaphoreGiveRecursive(sdCardMutex);
+      return false;
+    }
   }
-  
+
+
   /* check if card is detected */
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -382,9 +434,17 @@ bool MicroSd::AppendFile(File *i_file, String *i_msg) {
       /* write to file */
       if (i_file->print(i_msg->c_str())) {
         if (*i_file) {
-          i_file->flush();
+          /* flush() is the blocking part on SDMMC; per line it dominated web request
+             latency. Batch it, trading a small unsynced window for latency. Close
+             (rotation, reinit) still flushes. */
+          if (true == PeriodicCheck) {
+            i_file->flush();
+            LastLogFlushMillis = millis();
+          }
 
-          /* check if write was OK */
+          /* Sticky write-error flag. With batched flushing a card failure surfaces up
+             to LOG_FILE_FLUSH_INTERVAL late. Clear it (it latches otherwise) and drop
+             CardDetected so the SD task reinitialises. */
           if (!i_file->getWriteError()) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
             Serial.println("Write OK");
@@ -393,6 +453,8 @@ bool MicroSd::AppendFile(File *i_file, String *i_msg) {
 
           } else {
             Serial.println(F("Failed write to file"));
+            i_file->clearWriteError();
+            CardDetected = false;
 
           }
         } else {
@@ -410,7 +472,7 @@ bool MicroSd::AppendFile(File *i_file, String *i_msg) {
   }
 
   /* give mutex */
-  xSemaphoreGive(sdCardMutex);
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -422,6 +484,7 @@ bool MicroSd::AppendFile(File *i_file, String *i_msg) {
    @return bool - status
 */
 bool MicroSd::RenameFile(fs::FS &fs, String path1, String path2) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -436,6 +499,7 @@ bool MicroSd::RenameFile(fs::FS &fs, String path1, String path2) {
 #endif
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -446,6 +510,7 @@ bool MicroSd::RenameFile(fs::FS &fs, String path1, String path2) {
    @return bool - status
 */
 bool MicroSd::DeleteFile(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool status = false;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -460,6 +525,7 @@ bool MicroSd::DeleteFile(fs::FS &fs, String path) {
 #endif
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return status;
 }
 
@@ -470,6 +536,7 @@ bool MicroSd::DeleteFile(fs::FS &fs, String path) {
    @return uint32_t - size
 */
 uint32_t MicroSd::GetFileSize(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   uint32_t ret = 0;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -480,6 +547,7 @@ uint32_t MicroSd::GetFileSize(fs::FS &fs, String path) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
       Serial.println("Failed to open file for appending");
 #endif
+      xSemaphoreGiveRecursive(sdCardMutex);
       return 0;
     }
 
@@ -489,6 +557,7 @@ uint32_t MicroSd::GetFileSize(fs::FS &fs, String path) {
 #endif
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return ret; /* kb*/
 }
 
@@ -500,6 +569,7 @@ uint32_t MicroSd::GetFileSize(fs::FS &fs, String path) {
    @return int16_t - count
 */
 uint16_t MicroSd::FileCount(fs::FS &fs, String DirName, String FileName) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   uint16_t FileCount = 0;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)
@@ -509,10 +579,12 @@ uint16_t MicroSd::FileCount(fs::FS &fs, String DirName, String FileName) {
     File root = fs.open(DirName.c_str());
     if (!root) {
       Serial.println(F("Failed to open directory"));
+      xSemaphoreGiveRecursive(sdCardMutex);
       return 0;
     }
     if (!root.isDirectory()) {
       Serial.println(F("Not a directory"));
+      xSemaphoreGiveRecursive(sdCardMutex);
       return 0;
     }
 
@@ -539,6 +611,7 @@ uint16_t MicroSd::FileCount(fs::FS &fs, String DirName, String FileName) {
     }
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return FileCount;
 }
 
@@ -550,9 +623,11 @@ uint16_t MicroSd::FileCount(fs::FS &fs, String DirName, String FileName) {
    @return bool - status
 */
 bool MicroSd::RemoveFilesInDir(fs::FS &fs, String path, int maxFiles) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool ret = false;
   File dir = fs.open(path.c_str());
   if (!dir) {
+    xSemaphoreGiveRecursive(sdCardMutex);
     return ret;
   }
 
@@ -570,12 +645,15 @@ bool MicroSd::RemoveFilesInDir(fs::FS &fs, String path, int maxFiles) {
     file = dir.openNextFile();
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return ret;
 }
 
 
 int MicroSd::CountFilesInDir(fs::FS &fs, String path) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   uint16_t file_count = FileCount(fs, path, "");
+  xSemaphoreGiveRecursive(sdCardMutex);
   return file_count;
 }
 
@@ -585,17 +663,30 @@ int MicroSd::CountFilesInDir(fs::FS &fs, String path) {
    @return bool - status
 */
 void MicroSd::CheckCardUsedStatus() {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
 
   CardSizeMB = SD_MMC.cardSize()  / (1024 * 1024);
   CardTotalMB = SD_MMC.totalBytes() / (1024 * 1024);
   CardUsedMB = SD_MMC.usedBytes() / (1024 * 1024);
-  CardFreeMB = CardSizeMB - CardUsedMB;
-  FreeSpacePercent = (CardFreeMB * 100) / CardSizeMB;
-  UsedSpacePercent = 100 - FreeSpacePercent;
 
-#if (true == CONSOLE_VERBOSE_DEBUG)  
+  /* CardSizeMB == 0 (card removed or unreadable) would panic on divide, and this runs
+     every TASK_SDCARD ms. CardUsedMB can exceed CardSizeMB -- cardSize() and
+     usedBytes() come from different layers -- so clamp to avoid unsigned wrap. */
+  if (0 == CardSizeMB) {
+    CardFreeMB = 0;
+    FreeSpacePercent = 0;
+    UsedSpacePercent = 0;
+  } else {
+    CardFreeMB = (CardUsedMB >= CardSizeMB) ? 0 : (CardSizeMB - CardUsedMB);
+    FreeSpacePercent = (CardFreeMB * 100) / CardSizeMB;
+    UsedSpacePercent = 100 - FreeSpacePercent;
+  }
+
+#if (true == CONSOLE_VERBOSE_DEBUG)
   Serial.printf("Card size: %d MB, Total: %d MB, Used: %d MB, Free: %d GB, Free: %d %% \n", CardSizeMB, CardTotalMB, CardUsedMB, CardFreeMB, FreeSpacePercent);
 #endif
+
+  xSemaphoreGiveRecursive(sdCardMutex);
 }
 
 /**
@@ -605,33 +696,29 @@ void MicroSd::CheckCardUsedStatus() {
  * @return false 
  */
 bool MicroSd::isCardCorrupted() {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
   bool ret = true;
   if (true == CardDetected) {
 #if (true == CONSOLE_VERBOSE_DEBUG)   
     //Serial.println(F("Checking card..."));
 #endif
 
-    /* check card size */
+    /* size must always be read: use == 0 is normal on an empty card, only size == 0
+       means missing/unreadable */
+    uint64_t size = SD_MMC.cardSize();
     uint64_t use = SD_MMC.usedBytes();
-    uint64_t size = 0;
-    if (use != 0) {
-      size = SD_MMC.cardSize();
-    }
 
-#if (true == CONSOLE_VERBOSE_DEBUG)   
+#if (true == CONSOLE_VERBOSE_DEBUG)
     Serial.printf("Card size: %llu, Used: %llu\n", size, use);
 #endif
 
-    /* check space on the card */
-    if (size == use) {
-      Serial.println(F("No space left on device!"));
+    if (size == 0) {
+      Serial.println(F("No card detected!"));
       CardDetected = false;
       ret = false;
-    }
 
-    /* check another error */
-    if ((size <= 0 ) || (size == 0) || (use <= 0) || (use == 0)) {
-      Serial.println(F("No card detected!"));
+    } else if (use >= size) {
+      Serial.println(F("No space left on device!"));
       CardDetected = false;
       ret = false;
     }
@@ -640,6 +727,7 @@ bool MicroSd::isCardCorrupted() {
     ret = false;
   }
 
+  xSemaphoreGiveRecursive(sdCardMutex);
   return ret;
 }
 
@@ -650,8 +738,9 @@ bool MicroSd::isCardCorrupted() {
    @return String - data
 */  
 bool MicroSd::WritePicture(String i_PhotoName, uint8_t *i_PhotoData, size_t i_PhotoLen) {
-#if (true == CONSOLE_VERBOSE_DEBUG)  
-  Serial.println(f("WritePicture"));
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
+#if (true == CONSOLE_VERBOSE_DEBUG)
+  Serial.println(F("WritePicture"));
 #endif
   bool ret_stat = false;
 
@@ -671,7 +760,8 @@ bool MicroSd::WritePicture(String i_PhotoName, uint8_t *i_PhotoData, size_t i_Ph
   } else {
     Serial.printf("Failed. Could not open file: %s\n", i_PhotoName.c_str());
   }
-  
+
+  xSemaphoreGiveRecursive(sdCardMutex);
  return ret_stat;
 }
 
@@ -686,8 +776,9 @@ bool MicroSd::WritePicture(String i_PhotoName, uint8_t *i_PhotoData, size_t i_Ph
    @return bool - status
 */
 bool MicroSd::WritePicture(String i_PhotoName, uint8_t *i_PhotoData, size_t i_PhotoLen, const uint8_t *i_PtohoExif, size_t i_PhotoExifLen) {
+  xSemaphoreTakeRecursive(sdCardMutex, portMAX_DELAY);
 
-#if (true == CONSOLE_VERBOSE_DEBUG)  
+#if (true == CONSOLE_VERBOSE_DEBUG)
   Serial.println(F("WritePicture EXIF"));
 #endif
   bool ret_stat = false;
@@ -717,7 +808,8 @@ bool MicroSd::WritePicture(String i_PhotoName, uint8_t *i_PhotoData, size_t i_Ph
 #endif
     ret_stat = false;
   }
-  
+
+  xSemaphoreGiveRecursive(sdCardMutex);
  return ret_stat;
 }
 
