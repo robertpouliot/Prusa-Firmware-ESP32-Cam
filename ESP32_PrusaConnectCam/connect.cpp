@@ -515,16 +515,34 @@ void PrusaConnect::SavePhotoToSdCard() {
       return;
     }
 
-    /* check if folder for time laps photos exists */
+    /* Photos are stored as /timelapse/YYYYMMDD/HHMMSS.JPG, both parts 8.3-compatible.
+       After five days at one photo per two minutes that was ~3600 files, scanned
+       linearly on every enumeration and every file creation while holding sdCardMutex. */
     if (false == log->CheckDir(SD_MMC, TIMELAPS_PHOTO_FOLDER)) {
       log->AddEvent(LogLevel_Info, F("Create folder for TimeLaps photos"));
       log->CreateDir(SD_MMC, TIMELAPS_PHOTO_FOLDER);
     }
 
-    /* create file name */
-    String FileName = String(TIMELAPS_PHOTO_FOLDER) + "/" + String(TIMELAPS_PHOTO_PREFIX) + "_";
-    FileName += log->GetSystemTime();
-    FileName += TIMELAPS_PHOTO_SUFFIX;
+    /* Refuse to write on the 0000-00-00 placeholder, else a bogus day folder fills with
+       names that collide every second. */
+    String SysTime = log->GetSystemTime();
+    if ((SysTime.length() < 19) || (SysTime.startsWith("0000-00-00"))) {
+      log->AddEvent(LogLevel_Warning, F("Time not synced yet. Skip saving TimeLaps photo"));
+      return;
+    }
+
+    /* "YYYY-MM-DD_HH-MM-SS" -> dir "YYYYMMDD", file "HHMMSS.JPG" */
+    String DirName = String(TIMELAPS_PHOTO_FOLDER) + "/"
+                     + SysTime.substring(0, 4) + SysTime.substring(5, 7) + SysTime.substring(8, 10);
+
+    if (false == log->CheckDir(SD_MMC, DirName)) {
+      log->AddEvent(LogLevel_Info, F("Create TimeLaps day folder: "), DirName);
+      log->CreateDir(SD_MMC, DirName);
+    }
+
+    String FileName = DirName + "/"
+                      + SysTime.substring(11, 13) + SysTime.substring(14, 16) + SysTime.substring(17, 19)
+                      + TIMELAPS_PHOTO_SUFFIX;
     log->AddEvent(LogLevel_Verbose, F("Saving file: "), FileName);
 
     /* save photo to SD card */

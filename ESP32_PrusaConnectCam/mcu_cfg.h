@@ -112,8 +112,7 @@
 
 /* ---------------- TIMELAPS CFG ----------------*/
 #define TIMELAPS_PHOTO_FOLDER       "/timelapse"            ///< folder for timelaps photos
-#define TIMELAPS_PHOTO_PREFIX       "photo"                 ///< photo name for timelaps
-#define TIMELAPS_PHOTO_SUFFIX       ".jpg"                  ///< photo file type for timelaps
+#define TIMELAPS_PHOTO_SUFFIX       ".JPG"                  ///< photo file type for timelaps. Uppercase and 3 chars so the name fits FAT 8.3 with no VFAT long-name entries
 
 /* ---------------- FACTORY CFG  ----------------*/
 #define FACTORY_CFG_PHOTO_REFRESH_INTERVAL    30                ///< in the second
