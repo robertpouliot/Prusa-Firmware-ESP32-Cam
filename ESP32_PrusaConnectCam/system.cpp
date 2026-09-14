@@ -469,13 +469,33 @@ String System_printMcuResetReasonSimple() {
 }
 
 /**
+   @brief Subscribe the calling task to the task watchdog
+   @param none
+   @return none
+*/
+static void System_TaskWdtSubscribe() {
+  /* Each task subscribes itself as its first statement rather than being added from
+     setup() after xTaskCreatePinnedToCore() returns. Adding from there was a race: every
+     task runs at a higher priority than setup(), so it preempts on creation and could
+     reach its first esp_task_wdt_reset() before the matching add, logging
+     "esp_task_wdt_reset(707): task not found".
+     Failure is not fatal -- the task simply runs unsupervised -- but it must not be
+     silent, so report it once here instead of leaving only the recurring reset error. */
+  esp_err_t err = esp_task_wdt_add(NULL);
+  if (ESP_OK != err) {
+    SystemLog.AddEvent(LogLevel_Error, F("Task WDT subscribe failed: "),
+                       String(pcTaskGetName(NULL)) + ", err " + String(err));
+  }
+}
+
+/**
    @brief Function for WiFi management system task
    @param void *pvParameters
    @return none
 */
 void System_TaskWifiManagement(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("Task Wifi Management. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -504,7 +524,7 @@ void System_TaskWifiManagement(void *pvParameters) {
  */
 void System_TaskMain(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("System task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -529,7 +549,7 @@ void System_TaskMain(void *pvParameters) {
  */
 void System_TaskCaptureAndSendPhoto(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("Task photo processing. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -555,7 +575,7 @@ void System_TaskCaptureAndSendPhoto(void *pvParameters) {
       }
 
       /* rejoin the watchdog before the supervised part of the loop resumes */
-      esp_task_wdt_add(NULL);
+      System_TaskWdtSubscribe();
       esp_task_wdt_reset();
 
     } else {
@@ -581,7 +601,7 @@ void System_TaskCaptureAndSendPhoto(void *pvParameters) {
  */
 void System_TaskSdCardCheck(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("MicroSdCard check task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -634,7 +654,7 @@ void System_TaskSdCardCheck(void *pvParameters) {
  */
 void System_TaskSerialCfg(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SerialCg task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -658,7 +678,7 @@ void System_TaskSerialCfg(void *pvParameters) {
  */
 void System_TaskSystemTelemetry(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SystemTelemetry task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -716,7 +736,7 @@ void System_TaskSystemTelemetry(void *pvParameters) {
  */
 void System_TaskSysLed(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("SystemLed task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -738,7 +758,7 @@ void System_TaskSysLed(void *pvParameters) {
  */
 void System_TaskWiFiWatchdog(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("WiFiWatchdog task. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -762,7 +782,7 @@ void System_TaskWiFiWatchdog(void *pvParameters) {
  */
 void System_TaskSdCardRemove(void *pvParameters) {
   SystemLog.AddEvent(LogLevel_Info, F("TaskSdCardRemove. core: "), String(xPortGetCoreID()));
-  esp_task_wdt_add(NULL);
+  System_TaskWdtSubscribe();
   TickType_t xLastWakeTime = xTaskGetTickCount();
   SdCardRemoveTime = TASK_SDCARD_FILE_REMOVE;
 

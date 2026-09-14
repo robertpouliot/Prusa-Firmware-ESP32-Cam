@@ -199,6 +199,16 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
       String fullResponse = "";
       delay(10); // wait for response
       log->AddEvent(LogLevel_Verbose, F("Response:"));
+
+      /* Bounded, yielding read. connected() stays true while the peer holds the socket
+         open without sending, so the original "while (connected()) if (available())"
+         spun with no delay and no timeout. This task runs at priority 2, so it starved
+         everything below it -- observed as the task watchdog naming SystemNtpOtaUpdate,
+         loopTask and IDLE0 (all priority <= 2) while this task held CPU 0. The higher
+         priority tasks kept running, which is what identifies the spin as the cause.
+         delay(1) yields a tick; the deadline caps the total wait so a peer that never
+         replies cannot hold the task indefinitely. */
+      unsigned long ResponseStart = millis();
       while (client.connected()) {
         if (client.available()) {
           response = client.readStringUntil('\n');
@@ -214,6 +224,13 @@ bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i
               ret = true;
             }
           }
+
+        } else if ((millis() - ResponseStart) >= ((unsigned long)PRUSA_CONNECT_TIMEOUT_S * SECOND_TO_MILISECOND)) {
+          log->AddEvent(LogLevel_Warning, F("Timeout waiting for backend response"));
+          break;
+
+        } else {
+          delay(1);
         }
       }
       log->AddEvent(LogLevel_Verbose, "Full response: " + fullResponse);
